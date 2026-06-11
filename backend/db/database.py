@@ -1,3 +1,5 @@
+# SQLite database — session management, conversation history, ingestion log.
+
 import uuid
 import json 
 from datetime import datetime, timezone
@@ -8,7 +10,7 @@ from config import get_settings
 
 settings = get_settings()
 
-
+# create tables if not exist
 async def get_db() -> aiosqlite.Connection:
     Path(settings.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
     return await aiosqlite.connect(settings.sqlite_path)
