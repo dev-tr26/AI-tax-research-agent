@@ -11,15 +11,14 @@ from config import get_settings
 settings = get_settings()
 
 # create tables if not exist
-async def get_db() -> aiosqlite.Connection:
+def get_db() -> aiosqlite.Connection:
     Path(settings.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-    return await aiosqlite.connect(settings.sqlite_path)
+    return aiosqlite.connect(settings.sqlite_path)
 
 async def init_db():
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.executescript("""
-            CREATE TABLE IF NOT EXIST sessions(
-                session_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS sessions(
                 session_id TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -58,8 +57,8 @@ async def init_db():
         
 async def create_session(session_id: Optional[str] = None) -> str:
     sid = session_id or str(uuid.uuid4())
-    now = datetime.now(timezone.utc()).isoformat()
-    async with await get_db() as db:
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
         await db.execute(
         "INSERT OR IGNORE INTO sessions (session_id, created_at, updated_at) VALUES (?, ?, ?)",
             (sid, now, now)
@@ -68,21 +67,21 @@ async def create_session(session_id: Optional[str] = None) -> str:
     return sid
 
 async def get_session_history(session_id: str, limit: int = 10) -> List[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row 
         async with db.execute(
             """ SELECT role, content, citations, confidence FROM messages
                WHERE session_id = ? ORDER BY created_at DESC LIMIT ?""",
             (session_id, limit)
         ) as cursor:
-            rows = await cursor.fetchcall()
+            rows = await cursor.fetchall()
     return [dict(r) for r in reversed(rows)]
 
     
-async def save_message(session_id : str, role : str, content : str , citations : list = None, confidence : str = "UNKOWN", latency_ms : int =0,):
+async def save_message(session_id : str, role : str, content : str , citations : list = None, confidence : str = "UNKNOWN", latency_ms : int =0,):
     msg_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc()).isformat()
-    async with await get_db() as db:
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
         await db.execute(
              """INSERT INTO messages
                (message_id, session_id, role, content, citations, confidence, latency_ms, created_at)
@@ -100,8 +99,8 @@ async def save_message(session_id : str, role : str, content : str , citations :
 
 
 async def log_ingestion(chunk_id : str, source_type: str, source_url : str, status: str, error : str= None):
-    now = datetime.now(timezone.utc()).isoformat()
-    async with await get_db() as db:
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
         await db.execute(
         """INSERT OR REPLACE INTO ingestion_log
                (source_type, source_url, chunk_id, status, error_message, created_at)
@@ -111,8 +110,8 @@ async def log_ingestion(chunk_id : str, source_type: str, source_url : str, stat
         await db.commit()
         
 
-async def get_ingestion_status() -> dict:
-    async with await get_db() as db:
+async def get_ingestion_stats() -> dict:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT status, COUNT(*) as cnt FROM ingestion_log GROUP BY status"
@@ -122,7 +121,7 @@ async def get_ingestion_status() -> dict:
 
 
 async def list_sessions(limit : int = 50) -> List[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)

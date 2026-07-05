@@ -4,7 +4,6 @@ Central configuration — all settings loaded from environment variables.
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
-
 class Settings(BaseSettings):
     # LLM
     groq_api_key: str = ""
@@ -45,8 +44,8 @@ class Settings(BaseSettings):
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # Ingestion sources
-    ita_url: str = "https://www.indiacode.nic.in/handle/123456789/1501"
-    cbdt_circulars_url: str = "https://www.incometaxindia.gov.in/communications/circular/"
+    ita_url: str = "https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf"
+    cbdt_circulars_url: str = "https://www.incometaxindia.gov.in/en/circulars"
 
     class Config:
         env_file = ".env"

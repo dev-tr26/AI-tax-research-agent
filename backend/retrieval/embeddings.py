@@ -15,7 +15,7 @@ class EmbeddingService:
     _model: SentenceTransformer  = None 
     
     def __new__(cls):
-        if cls.instance is None:
+        if cls._instance is None:
             cls._instance = super().__new__(cls)
             
         return cls._instance

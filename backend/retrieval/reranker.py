@@ -3,10 +3,9 @@
 # implemented reciprocal rank fusion to merge vector + keyword results
 
 import logging
-from typing import List, Dict, Any, Tuple 
+from typing import List, Dict, Any
 from config import get_settings
 from sentence_transformers import CrossEncoder
-from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -46,24 +45,25 @@ class Reranker:
         reranked = sorted(candidates, key=lambda x: x.get("rerank_score", 0), reverse=True)
         return reranked[:top_k]
     
-    def reciprocal_rank_fusion(result_lists: List[List[Dict[str, Any]]], k: int = 60, top_k: int = 20,) -> List[Dict[str, Dict]]: 
-        # merge multiple ranked result lists using ,RRF k =60
-        scores: Dict[str, float] = {}
-        chunk_map: Dict[str, Dict] = {}
+
+def reciprocal_rank_fusion(result_lists: List[List[Dict[str, Any]]], k: int = 60, top_k: int = 20,) -> List[Dict[str, Any]]: 
+    # merge multiple ranked result lists using ,RRF k =60
+    scores: Dict[str, float] = {}
+    chunk_map: Dict[str, Dict] = {}
         
-        for result_list in result_lists:
-            for rank,chunk in enumerate(result_list):
-                cid = chunk["chunk_id"]
-                scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
-                if cid not in chunk_map:
-                    chunk_map[cid] = chunk
+    for result_list in result_lists:
+        for rank,chunk in enumerate(result_list):
+            cid = chunk["chunk_id"]
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+            if cid not in chunk_map:
+                chunk_map[cid] = chunk
                     
-        merged = []
-        for cid,rrf_score in sorted(scores.item(), key=lambda x: x[1], reverse=True):
-            entry = {**chunk_map[cid], "rrf_score": rrf_score}
-            merged.append(entry)
+    merged = []
+    for cid,rrf_score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+        entry = {**chunk_map[cid], "rrf_score": rrf_score}
+        merged.append(entry)
             
-        return merged[:top_k]
+    return merged[:top_k]
  
  
 

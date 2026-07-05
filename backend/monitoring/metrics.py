@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections import deque
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime,timezone
 import uuid 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class MetricsCollector:
             query_id = str(uuid.uuid4())[:8],
             session_id = session_id,
             query_preview=query[:80],
-            timestamp = datetime.now.utcnow().isoformat(),
+            timestamp = datetime.now(timezone.utc).isoformat(),
             embedding_ms=timings.get("embedding_ms", 0),
             vector_retrieval_ms=timings.get("vector_retrieval_ms", 0),
             keyword_retrieval_ms=timings.get("keyword_retrieval_ms", 0),

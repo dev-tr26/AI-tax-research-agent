@@ -1,194 +1,426 @@
-# Ingestion pipeline — fetches ITA 2025 and CBDT Circulars, parses, chunks,
-# embeds, and upserts to Pinecone + Elasticsearch
+"""
+Ingestion pipeline — Manual PDF upload mode.
+
+HOW TO ADD DOCUMENTS:
+─────────────────────
+  ITA 2025 PDF:
+    Place file at:  backend/data/pdfs/ita_2025.pdf
+
+  CBDT Circulars:
+    Place files at: backend/data/pdfs/circulars/
+    Any .pdf file is accepted.
+    Examples:
+      Circular-1-2025.pdf
+      Circular-359-1983.pdf
+
+Run:
+    python -m ingestion.pipeline --source all
+    python -m ingestion.pipeline --source ita
+    python -m ingestion.pipeline --source cbdt
+
+Required:  PINECONE_API_KEY in backend/.env
+Optional:  Elasticsearch (pipeline continues without it)
+"""
 
 import asyncio
 import argparse
 import logging
-import time
+import sys
+import os
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
-import requests
-import aiohttp
 from tqdm import tqdm
 
 from config import get_settings
 from ingestion.parsers import (
-    parse_pdf_with_pdfplumber, parse_html,
-    chunk_income_tax_act, chunk_cbdt_circular,
+    parse_any_pdf,
+    chunk_income_tax_act,
+    chunk_cbdt_circular,
 )
-from retrieval.embeddings import get_embedding_service
-from retrieval.vector_store import get_pinecone_store
-from retrieval.es_store import get_es_store
 from db.database import init_db, log_ingestion, get_ingestion_stats
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-
-# fetching 
-def fetch_pdf(url:str, save_path: Path) -> str:
-    # download pdf and returns local path 
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    if save_path.exists():
-        logger.info(f"PDF already cached : {save_path}")
-        return str(save_path)
-    logger.info(f"Downloading PDF : {url}")
-    resp = requests.get(url, timeout=60, stream=True)
-    resp.raise_for_status()
-    with open(save_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
-        logger.info(f"Saved PDF : {save_path}")
-        return str(save_path)
-    
-async def fetch_cbdt_circular_list(base_url: str) -> List[Dict]:
-    # scrape CBDT circular listing pages for pdf links
-    from bs4 import BeautifulSoup
-    async with aiohttp.ClientSession() as session:
-        async with session.get(base_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            html = await resp.text()
-
-    soup = BeautifulSoup(html, 'lxml')
-    circulars = []
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        if href.endswith(".pdf") or "circular" in href.lower():
-            full_url = href if href.startswith("http") else f"https://www.incometaxindia.gov.in{href}"
-            circulars.append({
-                "url": full_url,
-                "title": link.get_text(strip=True),
-            })
-    logger.info(f"Found {len(circulars)} CBDT circular links")
-    return circulars
+# ── Silence noisy ES / transport retry logs immediately on import ─────────────
+for _noisy in (
+    "elastic_transport",
+    "elastic_transport.transport",
+    "elastic_transport._node",
+    "elasticsearch",
+    "elasticsearch.helpers",
+):
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
 
-# indexing Embed chunks and upsert to Pinecone + Elasticsearch.
-async def index_chunks(chunks : List[Dict[str, Any]], namespace: str, es_index: str, batch_size: int = 50,):
+# ─────────────────────────────────────────────────────────────────────────────
+# Preflight checks
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_pinecone_key() -> bool:
+    """Return True if Pinecone API key is set, else log clear instructions."""
+    if not settings.pinecone_api_key or settings.pinecone_api_key.strip() == "":
+        logger.error(
+            "\n"
+            "  ✗  PINECONE_API_KEY is not set.\n\n"
+            "  HOW TO FIX:\n"
+            "  1. Sign up free at https://app.pinecone.io\n"
+            "  2. Create a project → copy your API key\n"
+            "  3. Open:  backend/.env\n"
+            "  4. Set:   PINECONE_API_KEY=your_key_here\n"
+            "  5. Re-run the pipeline\n"
+        )
+        return False
+    return True
+
+
+async def _check_elasticsearch() -> bool:
+    """
+    Quick single-attempt ping to Elasticsearch.
+    Returns True if reachable, False otherwise.
+    Suppresses all retry/connection log noise.
+    """
+    try:
+        from elasticsearch import AsyncElasticsearch
+        # max_retries=0 → single attempt, no retry spam
+        client = AsyncElasticsearch(
+            hosts=[settings.elasticsearch_url],
+            request_timeout=3,
+            max_retries=0,
+            retry_on_timeout=False,
+        )
+        alive = await client.ping()
+        await client.close()
+        return alive
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core indexing
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def index_chunks(
+    chunks: List[Dict[str, Any]],
+    namespace: str,
+    es_index: str,
+    batch_size: int = 50,
+    use_es: bool = False,
+) -> Tuple[int, int]:
+    """
+    Embed each chunk and upsert to Pinecone.
+    Also bulk-indexes to Elasticsearch if use_es=True.
+    Returns (success_count, total).
+    """
+    if not chunks:
+        logger.warning(f"No chunks to index for namespace={namespace}")
+        return 0, 0
+
+    from retrieval.embeddings import get_embedding_service
+    from retrieval.vector_store import get_pinecone_store
+
     emb_service = get_embedding_service()
     pc_store = get_pinecone_store()
-    es_store = get_es_store()
-    
+
+    # Only import ES store if we're actually going to use it
+    es_store = None
+    if use_es:
+        from retrieval.es_store import get_es_store
+        es_store = get_es_store()
+
     success_count = 0
     total = len(chunks)
-    
-    for i in tqdm(range(0, total, batch_size), desc=f"Indexing {namespace}"):
-        batch = chunks[i : i + batch_size]
+
+    for i in tqdm(range(0, total, batch_size), desc=f"  Indexing [{namespace}]"):
+        batch = chunks[i: i + batch_size]
         texts = [c["text"] for c in batch]
-        
-        try: 
+
+        try:
+            # 1. Embed batch
             embeddings = emb_service.embed_documents(texts)
             for chunk, emb in zip(batch, embeddings):
-                chunk["embedding"] = emb 
+                chunk["embedding"] = emb
+
+            # 2. Pinecone upsert
             pc_store.upsert_chunks(batch, namespace=namespace)
-            # elastic search bulk idx
-            await es_store.bulk_index(batch, es_index)
+
+            # 3. Elasticsearch (optional, never fatal)
+            if es_store:
+                try:
+                    await es_store.bulk_index(batch, es_index)
+                except Exception as es_err:
+                    logger.debug(f"ES bulk index skipped: {es_err}")
+
+            # 4. Log success to SQLite
             for chunk in batch:
                 await log_ingestion(
-                    chunk["chunk_id"], namespace, 
-                    chunk["metadata"].get("source_url" , " "), "SUCCESS"
+                    chunk["chunk_id"],
+                    namespace,
+                    chunk["metadata"].get("source_url", "local"),
+                    "SUCCESS",
                 )
                 success_count += 1
-        except Exception as e:
-            logger.error(f"Batch {i//batch_size + 1} failed: {e}")
-            for chunk in batch:
-                await log_ingestion(chunk["chunk_id"], namespace, "", "FAILED", str(e))
-    
-    logger.info(f"Indexed {success_count}/{total} chunks for {namespace}")
-    return success_count, total 
 
-# ITA 2025 ingestion 
-# fetch, parse, chunk, and index the Income Tax Act 2025
-async def ingest_ita_2025():
-    logger.info("=== Ingesting Income Tax Act 2025 ===")    
+        except Exception as e:
+            logger.error(f"Batch {i // batch_size + 1} failed: {e}")
+            for chunk in batch:
+                await log_ingestion(
+                    chunk["chunk_id"], namespace, "", "FAILED", str(e)
+                )
+
+    logger.info(
+        f"  Indexed {success_count}/{total} chunks "
+        f"→ Pinecone[{namespace}]"
+        + (f" + ES[{es_index}]" if use_es else "")
+    )
+    return success_count, total
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ITA 2025 ingestion
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def ingest_ita_2025(use_es: bool = False):
+    """
+    Parse the Income Tax Act 2025 from a locally placed PDF and index it.
+
+    Expected file:
+        backend/data/pdfs/ita_2025.pdf
+    """
+    logger.info("=" * 55)
+    logger.info("Ingesting Income Tax Act 2025")
+    logger.info("=" * 55)
+
     pdf_path = Path(settings.pdf_cache_dir) / "ita_2025.pdf"
-    try: 
-        fetch_pdf(settings.ita_url, pdf_path)
-        text = parse_pdf_with_pdfplumber(str(pdf_path))
-    except Exception as e:
-        logger.warning(f"PDF fetch failed ({e}), trying HTML extraction")
-        resp = requests.get(settings.ita_url, timeout=30)
-        text = parse_html(resp.text)
-        
-    if not text or len(text) < 1000:
-        logger.error("ITA 2025 text extraction failed — check source URL")
+
+    if not pdf_path.exists():
+        logger.error(
+            f"\n"
+            f"  ✗  ITA 2025 PDF not found at:\n"
+            f"       {pdf_path.resolve()}\n\n"
+            f"  HOW TO FIX:\n"
+            f"  1. Download the PDF from:\n"
+            f"       https://www.incometaxindia.gov.in/pages/acts/income-tax-act.aspx\n"
+            f"  2. Rename it to:  ita_2025.pdf\n"
+            f"  3. Place it at:   {pdf_path.resolve()}\n"
+            f"  4. Re-run:  python -m ingestion.pipeline --source ita\n"
+        )
         return
 
-    chunks = chunk_income_tax_act(text)
-    logger.info(f"Generated {len(chunks)} chunks from ITA 2025")
+    logger.info(f"Parsing: {pdf_path.name} ({pdf_path.stat().st_size // 1024} KB)")
+    text = parse_any_pdf(str(pdf_path))
 
-    es_store = get_es_store()
-    await es_store.ensure_indices()
+    if not text or len(text.strip()) < 500:
+        logger.error(
+            "Text extraction returned too little content.\n"
+            "  The PDF may be image-based (scanned). "
+            "Try a text-selectable PDF from incometaxindia.gov.in"
+        )
+        return
+
+    logger.info(f"Extracted {len(text):,} characters from PDF")
+
+    chunks = chunk_income_tax_act(text)
+    if not chunks:
+        logger.error("Chunking produced 0 chunks — check if PDF has proper section headings.")
+        return
+    logger.info(f"Generated {len(chunks)} section chunks")
+
+    # Setup ES indices if available
+    if use_es:
+        try:
+            from retrieval.es_store import get_es_store
+            await get_es_store().ensure_indices()
+        except Exception as e:
+            logger.warning(f"ES index setup failed (skipping): {e}")
+            use_es = False
 
     success, total = await index_chunks(
         chunks,
         namespace=settings.pinecone_namespace_act,
         es_index=settings.elasticsearch_index_act,
+        use_es=use_es,
     )
-    logger.info(f"ITA 2025 ingestion complete: {success}/{total}")
+    logger.info(f"✓ ITA 2025 complete: {success}/{total} chunks indexed\n")
 
-# CBDT circulars ingestion
 
-async def ingest_cbdt_circulars():
-    logger.info("=== Ingesting CBDT Circulars ===")
+# ─────────────────────────────────────────────────────────────────────────────
+# CBDT Circulars ingestion
+# ─────────────────────────────────────────────────────────────────────────────
 
-    pdf_dir = Path(settings.pdf_cache_dir) / "circulars"
-    pdf_dir.mkdir(parents=True, exist_ok=True)
+async def ingest_cbdt_circulars(use_es: bool = False):
+    """
+    Parse all CBDT circular PDFs from the local circulars folder and index them.
 
-    circular_links = await fetch_cbdt_circular_list(settings.cbdt_circulars_url)
-    all_chunks = []
+    Expected folder:
+        backend/data/pdfs/circulars/   (any *.pdf files inside)
+    """
+    logger.info("=" * 55)
+    logger.info("Ingesting CBDT Circulars")
+    logger.info("=" * 55)
 
-    async with aiohttp.ClientSession() as session:
-        for item in tqdm(circular_links, desc="Fetching circulars"):
-            url = item["url"]
-            safe_name = url.split("/")[-1] or "circular.pdf"
-            local_path = pdf_dir / safe_name
+    circulars_dir = Path(settings.pdf_cache_dir) / "circulars"
 
-            try:
-                if not local_path.exists():
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        content = await resp.read()
-                    with open(local_path, "wb") as f:
-                        f.write(content)
+    if not circulars_dir.exists():
+        circulars_dir.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            f"\n"
+            f"  Folder created: {circulars_dir.resolve()}\n\n"
+            f"  HOW TO ADD CIRCULARS:\n"
+            f"  1. Download circular PDFs from:\n"
+            f"       https://www.incometaxindia.gov.in/communications/circular/\n"
+            f"  2. Place each .pdf in: {circulars_dir.resolve()}\n"
+            f"  3. Re-run: python -m ingestion.pipeline --source cbdt\n"
+        )
+        return
 
-                if url.endswith(".pdf"):
-                    text = parse_pdf_with_pdfplumber(str(local_path))
-                else:
-                    text = parse_html(local_path.read_text(errors="replace"))
+    pdf_files = sorted(circulars_dir.glob("*.pdf"))
 
-                chunks = chunk_cbdt_circular(text, source_url=url)
-                all_chunks.extend(chunks)
+    if not pdf_files:
+        logger.warning(
+            f"\n"
+            f"  ✗  No PDF files found in: {circulars_dir.resolve()}\n\n"
+            f"  HOW TO ADD CIRCULARS:\n"
+            f"  1. Download circular PDFs from:\n"
+            f"       https://www.incometaxindia.gov.in/communications/circular/\n"
+            f"  2. Place each .pdf in: {circulars_dir.resolve()}\n"
+            f"  3. Re-run: python -m ingestion.pipeline --source cbdt\n"
+        )
+        return
 
-            except Exception as e:
-                logger.warning(f"Skipping {url}: {e}")
+    logger.info(f"Found {len(pdf_files)} PDF file(s)")
 
-    logger.info(f"Total CBDT chunks: {len(all_chunks)}")
+    all_chunks: List[Dict[str, Any]] = []
+    skipped = 0
 
-    es_store = get_es_store()
-    await es_store.ensure_indices()
+    for pdf_path in tqdm(pdf_files, desc="  Parsing circulars"):
+        logger.info(f"  Parsing: {pdf_path.name}")
+        text = parse_any_pdf(str(pdf_path))
+
+        if not text or len(text.strip()) < 50:
+            logger.warning(f"  Skipping {pdf_path.name}: empty or unreadable")
+            skipped += 1
+            continue
+
+        chunks = chunk_cbdt_circular(text, source_url="", filename=pdf_path.name)
+
+        if not chunks:
+            logger.warning(f"  Skipping {pdf_path.name}: chunking produced 0 results")
+            skipped += 1
+            continue
+
+        logger.info(f"  {pdf_path.name} → {len(chunks)} chunk(s)")
+        all_chunks.extend(chunks)
+
+    if not all_chunks:
+        logger.error(
+            "All circular PDFs were empty or unreadable.\n"
+            "  Confirm PDFs are text-based (not scanned images)."
+        )
+        return
+
+    logger.info(
+        f"Total: {len(all_chunks)} chunks from "
+        f"{len(pdf_files) - skipped}/{len(pdf_files)} files"
+        + (f" ({skipped} skipped)" if skipped else "")
+    )
+
+    # Setup ES indices if available
+    if use_es:
+        try:
+            from retrieval.es_store import get_es_store
+            await get_es_store().ensure_indices()
+        except Exception as e:
+            logger.warning(f"ES index setup failed (skipping): {e}")
+            use_es = False
 
     success, total = await index_chunks(
         all_chunks,
         namespace=settings.pinecone_namespace_circular,
         es_index=settings.elasticsearch_index_circular,
+        use_es=use_es,
     )
-    logger.info(f"CBDT Circulars ingestion complete: {success}/{total}")
+    logger.info(f"✓ CBDT Circulars complete: {success}/{total} chunks indexed\n")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def run_pipeline(source: str = "all"):
+    """
+    Full ingestion pipeline with upfront validation.
+    Fails immediately with clear instructions if Pinecone key is missing.
+    Gracefully skips Elasticsearch if it is not running.
+    """
     await init_db()
+
+    # ── 1. Validate Pinecone API key FIRST — hard requirement ────────────────
+    if not _check_pinecone_key():
+        sys.exit(1)
+
+    # ── 2. Check Elasticsearch — soft requirement (single quiet ping) ─────────
+    logger.info(f"Checking Elasticsearch at {settings.elasticsearch_url} ...")
+    es_up = await _check_elasticsearch()
+
+    if es_up:
+        logger.info("  ✓ Elasticsearch is running — hybrid search enabled")
+    else:
+        logger.warning(
+            "  ✗ Elasticsearch not reachable — "
+            "proceeding with Pinecone-only mode.\n"
+            "    Keyword/hybrid search will be unavailable.\n"
+            "    To enable it later: docker compose up -d elasticsearch"
+        )
+
+    # ── 3. Run ingestion ──────────────────────────────────────────────────────
     if source in ("all", "ita"):
-        await ingest_ita_2025()
+        await ingest_ita_2025(use_es=es_up)
+
     if source in ("all", "cbdt"):
-        await ingest_cbdt_circulars()
-    
+        await ingest_cbdt_circulars(use_es=es_up)
+
+    # ── 4. Final summary ──────────────────────────────────────────────────────
     stats = await get_ingestion_stats()
-    logger.info(f"Ingestion Stats: {stats}")
-    
+
+    logger.info("=" * 55)
+    logger.info("INGESTION SUMMARY")
+    logger.info("=" * 55)
+    for status, count in stats.items():
+        icon = "✓" if status == "SUCCESS" else "✗"
+        logger.info(f"  {icon}  {status:<10} : {count} chunks")
+    logger.info(f"  Pinecone     : connected (index={settings.pinecone_index_name})")
+    logger.info(f"  Elasticsearch: {'up' if es_up else 'not running (optional)'}")
+    logger.info("=" * 55)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["all", "ita", "cbdt"], default="all")
+    parser = argparse.ArgumentParser(
+        description="TaxAI ingestion pipeline — manual PDF mode",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+SETUP BEFORE RUNNING:
+  1. Set PINECONE_API_KEY in backend/.env
+  2. Place PDFs:
+       ITA 2025:       backend/data/pdfs/ita_2025.pdf
+       CBDT Circulars: backend/data/pdfs/circulars/*.pdf
+
+EXAMPLES:
+  python -m ingestion.pipeline --source all
+  python -m ingestion.pipeline --source ita
+  python -m ingestion.pipeline --source cbdt
+        """,
+    )
+    parser.add_argument(
+        "--source",
+        choices=["all", "ita", "cbdt"],
+        default="all",
+        help="Which source to ingest (default: all)",
+    )
     args = parser.parse_args()
     asyncio.run(run_pipeline(args.source))

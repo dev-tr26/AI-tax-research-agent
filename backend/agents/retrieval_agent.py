@@ -9,7 +9,7 @@ from config import get_settings
 from retrieval.embeddings import get_embedding_service
 from retrieval.vector_store import get_pinecone_store
 from retrieval.es_store import get_es_store
-from retrieval.reranker import get_reranker, reciprocal_rank_fusion
+from retrieval.reranker import get_reranker,reciprocal_rank_fusion
 from utils.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class RetrievalAgent:
         t0 = time.monotonic()
         pc_store = get_pinecone_store()
         vector_results = pc_store.query_all_namespace(query_embedding,top_k=settings.retrieval_top_k_candidates)
-        timings["vector_results_ms"] = int((time.monotonic() - t0) * 1000)
+        timings["vector_retrieval_ms"] = int((time.monotonic() - t0) * 1000)
         logger.info(
             f"[RetrievalAgent] Vector retrieval: {timings['vector_retrieval_ms']}ms "
             f"({len(vector_results)} candidates)"

@@ -24,7 +24,7 @@ ACT_MAPPING = {
             "last_amended": {"type": "date"},
         }
     },
-    "settings": {"number_of_shrads": 1, "number_of_replicas": 0},
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
 }
 
 CIRCULAR_MAPPING = {

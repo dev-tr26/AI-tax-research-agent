@@ -40,3 +40,5 @@ Thumbs.db
 *.pt
 *.safetensors
 sentence_transformers/
+
+frontend/
