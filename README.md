@@ -78,7 +78,6 @@ legal or tax advice. Consult a qualified tax professional before acting on any i
 
 ## System Features 
 
-```
 • Implement hybrid retrieval combining dense vector search with BM25 sparse search: 
 • Integrate OpenSearch, BM25s (Python library), or an equivalent BM25-capable store alongside your 
 vector index. 
@@ -86,30 +85,28 @@ vector index.
 • trace that hybrid retrieval outperforms vector-only search for exact 
 section-number queries (e.g., 'Section 2(22)(e)') by retrieving the exact statutory clause as the top result.
 • tracked latencies for last 7 responses. 
-```
+
 
 ## Response format 
 
-```
-## Final Answer 
-[Direct, non-generic answer to the query. Two to four sentences. Must take a 
+### Final Answer 
+[Direct, non-generic answer to the query. Two to four sentences. Take a 
 position — not hedge into ambiguity.] 
-## Legal Reasoning 
 
+### Legal Reasoning 
 - Statutory Basis: [Act Name, Section, Sub-section, Clause, Proviso] 
 - Regulatory Guidance:  [Circular/Notification number, issuing authority, date] 
 - Judicial Position:    [Case name, court, year, citation, key ratio] 
 
-## Supporting References 
-
+### Supporting References 
 [Act]      Section 2(22)(e), Income Tax Act, 2025 
 [Circular] CBDT Circular No. 495/1987 
 [Case Law] Kantilal Manilal vs CIT (SC 2025) AIR 2025 SC 1023 
 
-## Confidence & Disclaimer 
+### Confidence & Disclaimer 
 Confidence: HIGH | For research purposes only. Consult a qualified tax professional 
 for specific advice. 
-```
+
 
 ## Agent Interaction Flow — Single Query 
 The following sequence is the expected execution path for every user query: 
