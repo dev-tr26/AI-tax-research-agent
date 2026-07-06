@@ -138,6 +138,7 @@ class RetrievalAgent:
 
         llm = get_llm_client()
         raw_response = await llm.complete(prompt, temperature=0.1)
+        print(raw_response)
 
         return self._parse_synthesis(raw_response)
     
