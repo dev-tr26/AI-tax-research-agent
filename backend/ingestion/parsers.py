@@ -24,9 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Matches: "Section 2", "Section 2(22)", "Section 2(22)(e)", "Section 147A"
 SECTION_PATTERN = re.compile(
-    r"(?:^|\n)\s*(?:SECTION|Section)\s+(\d+[A-Z]?)"
-    r"(?:\s*\((\d+)\))?(?:\s*\(([a-z])\))?",
-    re.MULTILINE,
+    r"^\s*(?:section\s*)?(\d{1,3}[A-Z]?)(?:\s*\((\d+)\))?(?:\s*\(([a-z])\))?\s*[\.\-:]?\s*(.*)",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # Chapter heading pattern
@@ -169,7 +168,14 @@ def chunk_income_tax_act(full_text: str) -> List[Dict[str, Any]]:
             )
 
         # Detect new section — flush previous first
-        sec_match = SECTION_PATTERN.match(line)
+        sec_match = SECTION_PATTERN.search(line)
+
+        if not sec_match:
+            # fallback: detect numeric section headers like "2.", "2 -", "2 "
+            fallback = re.match(r"^\s*(\d{1,3}[A-Z]?)\s*[\.\-\:\)]?\s+(.*)", line)
+            if fallback:
+                sec_match = fallback
+    
         if sec_match:
             flush_chunk()
             current_section_num = sec_match.group(1)

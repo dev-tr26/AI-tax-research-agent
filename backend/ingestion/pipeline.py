@@ -119,6 +119,8 @@ async def index_chunks(
     """
     if not chunks:
         logger.warning(f"No chunks to index for namespace={namespace}")
+        logger.info(f"Sample chunks: {[c['chunk_id'] for c in chunks[:5]]}")
+        logger.info(f"Chunk sizes: min={min(len(c['text']) for c in chunks)}, max={max(len(c['text']) for c in chunks)}")
         return 0, 0
 
     from retrieval.embeddings import get_embedding_service
@@ -148,6 +150,8 @@ async def index_chunks(
 
             # 2. Pinecone upsert
             pc_store.upsert_chunks(batch, namespace=namespace)
+            stats = pc_store.index_stats()
+            print(stats)
 
             # 3. Elasticsearch (optional, never fatal)
             if es_store:

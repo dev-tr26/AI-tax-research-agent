@@ -49,8 +49,8 @@ class EmbeddingService:
     
     def embed_query(self, query: str) -> List[float]:
         # embed single query with BGE query prefix 
-        prefixed = f"Represent this sentence for searching relevant passages: {query}"
-        vec = self.embed(prefixed)[0]
+        # prefixed = f"Represent this sentence for searching relevant passages: {query}"
+        vec = self.embed(query)[0]
         return vec.tolist()
     
 

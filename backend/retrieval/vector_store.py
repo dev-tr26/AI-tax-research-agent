@@ -1,3 +1,4 @@
+from importlib.metadata import metadata
 import logging
 from typing import List, Dict, Any, Optional
 from pinecone import Pinecone, ServerlessSpec
@@ -90,6 +91,10 @@ class PineconeStore:
         )
         merged = act_results + circ_results 
         merged.sort(key=lambda x: x["score"], reverse =True)
+        logger.info(f"ACT results: {len(act_results)}")
+        logger.info(f"CIRC results: {len(circ_results)}")
+        if len(act_results) == 0:
+            logger.warning("ITA namespace is empty — ingestion failed or not searchable")
         return merged[:top_k]
     
 
