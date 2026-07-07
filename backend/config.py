@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     fast_model: str = "gemini-2.0-flash"                # Gemini for classification
 
     # Embeddings
-    embedding_model: str = "BAAI/bge-large-en-v1.5"
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 1024
 
     # Pinecone
