@@ -17,6 +17,8 @@ from monitoring.routes import router as metrics_router
 from api.sessions import router as sessions_router
 from api.ingest import router as ingest_router
 from utils.logging_config import setup_logging
+from retrieval.embeddings import get_embedding_service
+from retrieval.reranker import get_reranker
 
 
 setup_logging()
@@ -30,32 +32,32 @@ async def lifespan(app: FastAPI):
     logger.info("TaxAI starting up...")
     await init_db()
 
-    try:
-        from retrieval.embeddings import get_embedding_service
-        get_embedding_service().embed_query("warmup income tax")
-        logger.info("Embedding model warm.")
-    except Exception as e:
-        logger.warning(f"Embedding warmup skipped: {e}")
-
-    try:
-        from retrieval.reranker import get_reranker
-        get_reranker()
-        logger.info("Reranker warm.")
-    except Exception as e:
-        logger.warning(f"Reranker warmup skipped: {e}")
-
-    try:
-        from utils.section_index import get_section_index
-        idx = get_section_index()
-        await idx.build_from_pinecone()
-    except Exception as e:
-        logger.warning(f"Section index build skipped: {e}")
-
-    logger.info("TaxAI ready.")
+    asyncio.create_task(background_warmup())
+    logger.info("Embedding model warm.")
     yield
     logger.info("TaxAI shutting down.")
 
 
+async def background_warmup():
+    try:
+        from retrieval.embeddings import get_embedding_service
+        get_embedding_service().embed_query("warmup")
+    except Exception as e:
+        logger.warning(e)
+
+    try:
+        from retrieval.reranker import get_reranker
+        get_reranker()
+    except Exception as e:
+        logger.warning(e)
+
+    try:
+        from utils.section_index import get_section_index
+        await get_section_index().build_from_pinecone()
+    except Exception as e:
+        logger.warning(e)
+        
+        
 app = FastAPI(
     title="TaxAI — Indian Tax Research Platform",
     description="Agentic AI for Direct Tax (ITA 2025 + CBDT Circulars). Three-agent AutoGen pipeline.",
