@@ -47,7 +47,7 @@ async def background_warmup():
 
     try:
         from retrieval.reranker import get_reranker
-        get_reranker()
+        # get_reranker()
     except Exception as e:
         logger.warning(e)
 
