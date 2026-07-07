@@ -1,0 +1,38 @@
+name: Golden Dataset Evaluation
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"   # every Monday at 2am UTC
+  workflow_dispatch:       # manual trigger
+
+jobs:
+  eval:
+    name: Run Golden Dataset (10 queries)
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install httpx pytest
+
+      - name: Run golden dataset against production
+        run: python -m tests.golden_dataset.run_eval
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+          API_BASE: ${{ secrets.BACKEND_URL }}
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-dataset-results-${{ github.run_id }}
+          path: golden_dataset_results.json
+          retention-days: 30
